@@ -1,0 +1,38 @@
+spring:
+  config:
+    activate:
+      on-profile: prod
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # URI de Cognito para validar tokens JWT
+          # Variable de entorno en Lambda: COGNITO_JWK_SET_URI
+          jwk-set-uri: ${COGNITO_JWK_SET_URI:https://cognito-idp.us-east-1.amazonaws.com/us-east-1_pX2qq94hb/.well-known/jwks.json}
+  # lazy-initialization: evita que Spring Security descargue claves Cognito
+  # durante la inicializacion de Lambda (fase de snapshot de SnapStart).
+  # Las claves se cargan en la primera peticion real, no al arrancar.
+  main:
+    lazy-initialization: true
+
+logging:
+  level:
+    root: WARN
+    com.msgpipeline: INFO
+
+springdoc:
+  swagger-ui:
+    enabled: false
+  api-docs:
+    enabled: false
+
+management:
+  health:
+    diskspace:
+      enabled: false
+
+app:
+  aws:
+    dynamo-table-name: ${DYNAMODB_TABLE_NAME:msg-pipeline-messages}
+    sqs-queue-url: ${SQS_QUEUE_URL:}
+    region: ${AWS_REGION_NAME:us-east-1}

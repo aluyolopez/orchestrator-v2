@@ -1,0 +1,198 @@
+# Pipeline CI/CD — msg-pipeline-orchestrator-v2 con Deploy Canary
+# Sesion 08 — Especializacion Spring Boot + AWS Serverless 2026C1
+name: Deploy Lambda v2 con Canary
+
+# on: define los eventos que activan el workflow.
+on:
+  # push a la rama main ejecuta el pipeline en cada commit o merge.
+  push:
+    branches: [ main ]
+  # workflow_dispatch permite ejecutarlo manualmente desde la pestana Actions.
+  workflow_dispatch:
+
+# env: variables disponibles en todos los steps del workflow.
+env:
+  # JAR_PATH: nombre exacto del JAR generado por lambdaJar en build.gradle.
+  # archiveFileName = "msg-pipeline-orchestrator.jar" en build.gradle
+  JAR_PATH: build/libs/msg-pipeline-orchestrator.jar
+  # S3_KEY: ruta del objeto en S3 — debe coincidir con CodeUri.Key en template.yaml
+  S3_KEY: lambdas-v2/orchestrator/msg-pipeline-orchestrator-v2-lambda.jar
+  # CANARY_WEIGHT: porcentaje inicial para la nueva version (0.10 = 10%)
+  CANARY_WEIGHT: "0.10"
+  # CANARY_WAIT_MINUTES: minutos de observacion antes del rollout al 100%
+  CANARY_WAIT_MINUTES: "5"
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # STEP 1 — Checkout del codigo fuente
+      - name: "1 Checkout del codigo fuente"
+        uses: actions/checkout@v4
+
+      # STEP 2 — Configurar Java 17 Amazon Corretto
+      # Misma distribucion JVM que Lambda usa en AWS — garantiza paridad
+      - name: "2 Configurar Java 17 Amazon Corretto"
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "corretto"
+
+      # STEP 3 — Cache de dependencias Gradle
+      # Reduce el tiempo de build en ~60% en runs posteriores
+      - name: "3 Cache de dependencias Gradle"
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      # STEP 4 — Permisos de gradlew
+      # Necesario porque git no preserva permisos de ejecucion en todos los OS
+      - name: "4 Dar permisos a gradlew"
+        run: chmod +x gradlew
+
+      # STEP 5 — Build del proyecto con lambdaJar
+      # lambdaJar genera un JAR PLANO (clases en raiz) — NO bootJar (BOOT-INF/classes/)
+      # Lambda requiere clases en la raiz del JAR para cargarlas correctamente
+      - name: "5 Build con Gradle lambdaJar"
+        run: ./gradlew lambdaJar --no-daemon
+
+      # STEP 6 — Configurar credenciales AWS
+      # Lee AWS_ACCESS_KEY_ID y AWS_SECRET_ACCESS_KEY desde GitHub Secrets
+      - name: "6 Configurar credenciales AWS"
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # STEP 7 — Subir JAR a S3
+      # S3 es el repositorio centralizado de artefactos Lambda
+      - name: "7 Subir JAR v2 al bucket S3"
+        run: |
+          aws s3 cp ${{ env.JAR_PATH }} \
+            s3://${{ secrets.S3_BUCKET }}/${{ env.S3_KEY }} \
+            --region ${{ secrets.AWS_REGION }}
+          echo "JAR subido a: s3://${{ secrets.S3_BUCKET }}/${{ env.S3_KEY }}"
+
+      # STEP 8 — Actualizar codigo del Lambda ($LATEST)
+      # update-function-code actualiza $LATEST con el nuevo JAR desde S3
+      - name: "8 Actualizar codigo del Lambda v2"
+        run: |
+          aws lambda update-function-code \
+            --function-name ${{ secrets.LAMBDA_FUNCTION_NAME }} \
+            --s3-bucket ${{ secrets.S3_BUCKET }} \
+            --s3-key ${{ env.S3_KEY }} \
+            --region ${{ secrets.AWS_REGION }}
+
+      # STEP 9 — Esperar actualizacion de Lambda
+      # Sin este wait, publish-version podria usar el codigo del deploy anterior
+      - name: "9 Esperar actualizacion de Lambda"
+        run: |
+          aws lambda wait function-updated \
+            --function-name ${{ secrets.LAMBDA_FUNCTION_NAME }} \
+            --region ${{ secrets.AWS_REGION }}
+
+      # STEP 10 — Publicar version inmutable con SnapStart
+      # publish-version crea una version numerica (1, 2, 3...) inmutable
+      # SnapStart crea el snapshot de la JVM para esta version (elimina cold starts)
+      - name: "10 Publicar nueva version con SnapStart"
+        id: publish
+        run: |
+          VERSION=$(aws lambda publish-version \
+            --function-name ${{ secrets.LAMBDA_FUNCTION_NAME }} \
+            --description "Deploy-${{ github.sha }}" \
+            --region ${{ secrets.AWS_REGION }} \
+            --query "Version" --output text)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version publicada: $VERSION"
+
+      # STEP 11 — Obtener version estable del alias prod
+      # Si el alias apunta a $LATEST (primer deploy), is_first_deploy=true
+      # y se salta el canary — el alias apunta directamente al 100%
+      - name: "11 Obtener version estable del alias prod"
+        id: stable
+        run: |
+          STABLE=$(aws lambda get-alias \
+            --function-name ${{ secrets.LAMBDA_FUNCTION_NAME }} \
+            --name ${{ secrets.LAMBDA_ALIAS }} \
+            --region ${{ secrets.AWS_REGION }} \
+            --query "FunctionVersion" --output text)
+          echo "stable_version=$STABLE" >> $GITHUB_OUTPUT
+          # Detectar primer deploy: $LATEST no es valido para Traffic Shifting
+          if [[ "$STABLE" == "\$LATEST" || -z "$STABLE" ]]; then
+            echo "is_first_deploy=true" >> $GITHUB_OUTPUT
+            echo "Primer deploy detectado — alias apunta a: $STABLE"
+          else
+            echo "is_first_deploy=false" >> $GITHUB_OUTPUT
+            echo "Version estable: $STABLE"
+          fi
+
+      # STEP 12 — Traffic Shifting canary
+      # Primer deploy: alias apunta directamente al 100% de la nueva version
+      # Deploys siguientes: canary 10% nueva / 90% estable
+      - name: "12 Traffic Shifting canary 10%"
+        run: |
+          NEW_VERSION="${{ steps.publish.outputs.version }}"
+          STABLE_VERSION="${{ steps.stable.outputs.stable_version }}"
+          IS_FIRST="${{ steps.stable.outputs.is_first_deploy }}"
+
+          if [[ "$IS_FIRST" == "true" ]]; then
+            echo "Primer deploy — alias prod -> 100% v$NEW_VERSION (sin canary)"
+            aws lambda update-alias \
+              --function-name ${{ secrets.LAMBDA_FUNCTION_NAME }} \
+              --name ${{ secrets.LAMBDA_ALIAS }} \
+              --function-version "$NEW_VERSION" \
+              --routing-config '{}' \
+              --region ${{ secrets.AWS_REGION }}
+          else
+            echo "Canary deploy — stable: v$STABLE_VERSION | nueva: v$NEW_VERSION (10%)"
+            aws lambda update-alias \
+              --function-name ${{ secrets.LAMBDA_FUNCTION_NAME }} \
+              --name ${{ secrets.LAMBDA_ALIAS }} \
+              --function-version "$STABLE_VERSION" \
+              --routing-config "{\"AdditionalVersionWeights\":{\"$NEW_VERSION\":${{ env.CANARY_WEIGHT }}}}" \
+              --region ${{ secrets.AWS_REGION }}
+          fi
+
+      # STEP 13 — Periodo de observacion canary (5 minutos)
+      # Solo ejecuta si NO es primer deploy
+      # Durante este tiempo monitorear: CloudWatch Errors, X-Ray latencia
+      - name: "13 Periodo de observacion canary (5 min)"
+        if: steps.stable.outputs.is_first_deploy == 'false'
+        run: |
+          echo "Observando metricas canary durante ${{ env.CANARY_WAIT_MINUTES }} minutos..."
+          echo "Verificar en CloudWatch: Lambda/Errors y Lambda/Duration"
+          sleep $(( ${{ env.CANARY_WAIT_MINUTES }} * 60 ))
+
+      # STEP 14 — Rollout completo al 100%
+      # Mueve el alias de canary (10%) a 100% de la nueva version
+      # routing-config '{}' elimina el Traffic Shifting
+      - name: "14 Rollout completo al 100%"
+        if: steps.stable.outputs.is_first_deploy == 'false'
+        run: |
+          aws lambda update-alias \
+            --function-name ${{ secrets.LAMBDA_FUNCTION_NAME }} \
+            --name ${{ secrets.LAMBDA_ALIAS }} \
+            --function-version ${{ steps.publish.outputs.version }} \
+            --routing-config '{}' \
+            --region ${{ secrets.AWS_REGION }}
+          echo "Deploy completo: alias prod -> v${{ steps.publish.outputs.version }} (100%)"
+
+      # STEP 15 — Resumen del deploy
+      - name: "15 Resumen del deploy"
+        run: |
+          echo "=================================="
+          echo "=== Deploy completado exitosamente"
+          echo "=================================="
+          echo "Funcion:       ${{ secrets.LAMBDA_FUNCTION_NAME }}"
+          echo "Version nueva: ${{ steps.publish.outputs.version }}"
+          echo "Commit:        ${{ github.sha }}"
+          echo "Primer deploy: ${{ steps.stable.outputs.is_first_deploy }}"
+          echo "Timestamp:     $(date -u '+%Y-%m-%dT%H:%M:%SZ')"

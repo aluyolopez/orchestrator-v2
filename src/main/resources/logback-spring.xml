@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+
+  <!-- ═══ Perfil PROD: JSON estructurado para CloudWatch Logs Insights ═══ -->
+  <springProfile name="prod">
+    <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+      <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+        <!-- Campos adicionales en cada log entry -->
+        <customFields>{"service":"msg-pipeline-orchestrator","environment":"prod"}</customFields>
+        <!-- Stack trace como campo JSON (no rompe el formato) -->
+        <throwableConverter class="net.logstash.logback.stacktrace.ShortenedThrowableConverter">
+          <maxDepthPerCause>20</maxDepthPerCause>
+          <rootCauseFirst>true</rootCauseFirst>
+        </throwableConverter>
+      </encoder>
+    </appender>
+    <root level="INFO">
+      <appender-ref ref="STDOUT"/>
+    </root>
+    <logger name="com.msgpipeline" level="INFO"/>
+    <logger name="software.amazon.awssdk" level="WARN"/>
+  </springProfile>
+
+  <!-- ═══ Perfil LOCAL: logs legibles en consola ═══ -->
+  <springProfile name="local">
+    <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+      <encoder>
+        <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+      </encoder>
+    </appender>
+    <root level="DEBUG">
+      <appender-ref ref="STDOUT"/>
+    </root>
+    <logger name="com.msgpipeline" level="DEBUG"/>
+    <logger name="software.amazon.awssdk" level="WARN"/>
+  </springProfile>
+
+</configuration>

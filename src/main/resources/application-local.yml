@@ -1,0 +1,20 @@
+spring:
+  config:
+    activate:
+      on-profile: local
+  # En local se deshabilita la seguridad JWT para facilitar el desarrollo
+  # SecurityConfig detecta el perfil y permite todo en local
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          jwk-set-uri: https://cognito-idp.us-east-1.amazonaws.com/LOCAL_DISABLED/.well-known/jwks.json
+
+server:
+  port: 8080
+
+app:
+  aws:
+    dynamo-table-name: msg-pipeline-messages-local
+    sqs-queue-url: ""
+    region: us-east-1

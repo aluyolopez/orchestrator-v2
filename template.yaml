@@ -1,0 +1,105 @@
+# template.yaml — Sesion 08: Especializacion Spring Boot + AWS Serverless 2026C1
+# NOTA: SnapStart comentado para el primer deploy estable.
+# Habilitar en el segundo deploy una vez que el Lambda funcione correctamente.
+
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+
+Description: >
+  msg-pipeline v2 — Arquitectura serverless completa
+  con SAM, SnapStart y GitHub Actions CI/CD
+
+Globals:
+  Function:
+    Runtime: java17
+    Architectures: [x86_64]
+    MemorySize: 512
+    Timeout: 60
+    Environment:
+      Variables:
+        AWS_REGION_NAME: !Ref AWS::Region
+        DYNAMODB_TABLE_NAME: msg-pipeline-messages
+        SPRING_PROFILES_ACTIVE: prod
+
+Parameters:
+  S3BucketArtifacts:
+    Type: String
+    Description: "Nombre del bucket S3 — Ej: msg-pipeline-artifacts-629742034427"
+
+  SQSQueueUrl:
+    Type: String
+    Description: "URL de la cola SQS"
+
+  SNSTopicArn:
+    Type: String
+    Description: "ARN del topic SNS"
+
+  CognitoJwkSetUri:
+    Type: String
+    Description: "JWK Set URI de Cognito para validar tokens JWT"
+
+Resources:
+
+  # API Gateway v2
+  MsgPipelineApiV2:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: msg-pipeline-api-v2
+      StageName: prod
+      Description: "API Gateway v2 para msg-pipeline con SAM"
+      Cors:
+        AllowMethods: "'POST,GET,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,Authorization'"
+        AllowOrigin: "'*'"
+
+  # Lambda Orchestrator v2
+  # SnapStart deshabilitado en primer deploy — habilitar en segundo deploy
+  # agregando:  SnapStart:
+  #               ApplyOn: PublishedVersions
+  OrchestratorFunctionV2:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: msg-pipeline-orchestrator-v2
+      Description: "Lambda Orchestrator v2 — Spring Boot + Cognito JWT"
+      Handler: com.msgpipeline.api.LambdaHandler::handleRequest
+      AutoPublishAlias: prod
+
+      CodeUri:
+        Bucket: !Ref S3BucketArtifacts
+        Key: lambdas-v2/orchestrator/msg-pipeline-orchestrator-v2-lambda.jar
+
+      Environment:
+        Variables:
+          SQS_QUEUE_URL:       !Ref SQSQueueUrl
+          COGNITO_JWK_SET_URI: !Ref CognitoJwkSetUri
+
+      Policies:
+        - SQSSendMessagePolicy:
+            QueueName: msg-pipeline-queue
+        - DynamoDBCrudPolicy:
+            TableName: msg-pipeline-messages
+
+      Events:
+        ApiProxyEvent:
+          Type: Api
+          Properties:
+            RestApiId: !Ref MsgPipelineApiV2
+            Path: /{proxy+}
+            Method: ANY
+        ApiRootEvent:
+          Type: Api
+          Properties:
+            RestApiId: !Ref MsgPipelineApiV2
+            Path: /
+            Method: ANY
+
+Outputs:
+  ApiEndpointV2:
+    Description: "URL del API Gateway v2 — usar como base_url_v2 en Postman"
+    Value: !Sub "https://${MsgPipelineApiV2}.execute-api.${AWS::Region}.amazonaws.com/prod"
+    Export:
+      Name: MsgPipelineApiEndpointV2
+
+  OrchestratorFunctionArnV2:
+    Description: "ARN de la Lambda Orchestrator v2"
+    Value: !GetAtt OrchestratorFunctionV2.Arn

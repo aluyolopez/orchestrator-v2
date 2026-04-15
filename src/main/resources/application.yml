@@ -1,0 +1,50 @@
+spring:
+  application:
+    name: msg-pipeline-orchestrator
+  profiles:
+    active: local
+
+# ─── Sesión 05/06: OAuth2 Resource Server (Cognito JWT) ───────────────────────
+# En prod: se sobreescribe con la variable COGNITO_JWK_SET_URI
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          jwk-set-uri: ${COGNITO_JWK_SET_URI:https://cognito-idp.us-east-1.amazonaws.com/us-east-1_pX2qq94hb/.well-known/jwks.json}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: always
+  info:
+    env:
+      enabled: true
+
+info:
+  app:
+    name: msg-pipeline-orchestrator
+    version: 1.0.0
+
+logging:
+  level:
+    root: INFO
+    com.msgpipeline: DEBUG
+    software.amazon.awssdk: WARN
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+    enabled: true
+  api-docs:
+    path: /v3/api-docs
+    enabled: true
+
+app:
+  aws:
+    dynamo-table-name: msg-pipeline-messages
+    sqs-queue-url: ""
+    region: us-east-1
